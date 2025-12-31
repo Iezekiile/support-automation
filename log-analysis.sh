@@ -30,25 +30,53 @@ select_time_range() {
 find_log_files() {
   local domain="$1"
   local logs=()
+  local patterns=()
 
-  # Можливі шляхи для пошуку логів
-  paths=("/var/log/nginx/domains" "/var/log/nginx" "/var/log/apache2" "/usr/local/nginx/logs")
+  # Типові каталоги з логами
+  local paths=(
+    "/var/log/nginx/domains"
+    "/var/log/nginx"
+    "/var/log/apache2"
+    "/usr/local/nginx/logs"
+    "/var/www"
+  )
+
+  # Формуємо патерни
+  if [[ -n "$domain" ]]; then
+    patterns=(
+      "$domain"
+      "$domain.*"
+      "*$domain*"
+      "*${domain}_ssl*"
+      "*${domain}-ssl*"
+      "access.log"
+      "access.log.*"
+    )
+  else
+    patterns=(
+      "access.log"
+      "access.log.*"
+      "*.log"
+      "*_ssl*"
+      "*-ssl*"
+    )
+  fi
 
   for p in "${paths[@]}"; do
-    if [[ -d "$p" ]]; then
-      if [[ -z "$domain" ]]; then
-        # всі логи з каталогу
-        mapfile -t files < <(find "$p" -type f -name "*.log" -print)
-      else
-        # шукаємо файли, в імені яких є домен
-        mapfile -t files < <(find "$p" -type f -name "*$domain*.log" -print)
-      fi
-      logs+=("${files[@]}")
-    fi
+    [[ -d "$p" ]] || continue
+
+    for pat in "${patterns[@]}"; do
+      while IFS= read -r -d '' file; do
+        # Базова перевірка: файл має бути текстовим і читабельним
+        if [[ -r "$file" ]] && file "$file" | grep -qi "text"; then
+          logs+=("$file")
+        fi
+      done < <(find "$p" -type f -name "$pat" -print0 2>/dev/null)
+    done
   done
 
-  # Унікалізуємо
-  echo "${logs[@]}" | tr ' ' '\n' | sort -u
+  # Прибираємо дублікати
+  printf '%s\n' "${logs[@]}" | sort -u
 }
 
 # Фільтрація логів за часом
