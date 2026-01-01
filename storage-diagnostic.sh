@@ -58,8 +58,19 @@ top_heavy_files() {
   print_line
   echo "Найважчі файли (>${MIN_SIZE}):"
 
+  # Use a null-delimited loop instead of xargs to avoid running du with no args.
   find "$ROOT" $(build_find_excludes) -type f -size "$MIN_SIZE" -print0 2>/dev/null \
-    | xargs -0 du -b 2>/dev/null \
+    | (
+        found=0
+        while IFS= read -r -d '' file; do
+          found=1
+          du -b "$file" 2>/dev/null
+        done
+        # If nothing found, produce no output (prevents du reporting '.' when no args)
+        if [ "$found" -eq 0 ]; then
+          :
+        fi
+      ) \
     | sort -nr \
     | head -n "$TOP" \
     | while read SIZE FILE; do
@@ -99,34 +110,63 @@ top_dirs_by_inodes() {
   print_line
   echo "Найважчі директорії (за інодами, нижній рівень):"
 
-  find "$ROOT" -xdev -type f 2>/dev/null \
-    | awk -F/ '
-      {
-        dir=""
-        for (i=1; i<=NF-1; i++) {
-          dir=dir"/"$i
-          count[dir]++
+  # Try to use 'du --inodes' if available (most GNU coreutils support it).
+  # Fallback to 'find' counting if du --inodes is not supported.
+  if du -x --inodes "$ROOT" >/dev/null 2>&1; then
+    du -x --inodes "$ROOT" 2>/dev/null \
+      | sort -nr \
+      | awk '
+        {
+          path=$2
+          skip=0
+          for (i in seen)
+            if (index(path, i"/") == 1) skip=1
+          if (!skip) {
+            seen[path]=1
+            print $1, path
+          }
         }
-      }
-      END {
-        for (d in count)
-          print count[d], d
-      }
-    ' \
-    | sort -nr \
-    | awk '
-      {
-        path=$2
-        skip=0
-        for (i in seen)
-          if (index(path, i"/") == 1) skip=1
-        if (!skip) {
-          seen[path]=1
-          print
+      ' \
+      | head -n "$TOP"
+  else
+    # Fallback: count files under ROOT using find (relative paths) and aggregate.
+    # This produces similar results but may differ in edge cases vs du --inodes.
+    # Normalize ROOT (remove trailing slash except for "/")
+    local ROOT_NO_TRAIL="${ROOT%/}"
+    if [[ -z "$ROOT_NO_TRAIL" ]]; then
+      ROOT_NO_TRAIL="/"
+    fi
+
+    find "$ROOT" -xdev -type f -printf '%P\0' 2>/dev/null \
+      | awk -v root="$ROOT_NO_TRAIL" 'BEGIN { RS = "\0"; FS = "/" }
+        {
+          # skip empty records
+          if (NF == 1 && $1 == "") next
+          cur = root
+          for (i = 1; i <= NF - 1; i++) {
+            if (cur == "/") cur = "/" $i
+            else cur = cur "/" $i
+            count[cur]++
+          }
         }
-      }
-    ' \
-    | head -n "$TOP"
+        END {
+          for (d in count) print count[d], d
+        }' \
+      | sort -nr \
+      | awk '
+        {
+          path=$2
+          skip=0
+          for (i in seen)
+            if (index(path, i"/") == 1) skip=1
+          if (!skip) {
+            seen[path]=1
+            print
+          }
+        }
+      ' \
+      | head -n "$TOP"
+  fi
 }
 
 print_inode_usage() {
