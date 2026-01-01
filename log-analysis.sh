@@ -28,11 +28,37 @@ else
     exit 1
 fi
 
-if pgrep -x directadmin >/dev/null; then
+# Розширена перевірка панелі керування
+# helper: перевірити systemctl тільки якщо команда доступна
+is_active() {
+    local svc="$1"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet "$svc" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# DirectAdmin
+if pgrep -x directadmin >/dev/null 2>&1 \
+   || pgrep -f '/usr/local/directadmin' >/dev/null 2>&1 \
+   || [ -x /usr/local/directadmin/directadmin ] \
+   || is_active directadmin; then
     PANEL="DirectAdmin"
-elif [ -d /usr/local/cpanel ]; then
+
+# cPanel (cpsrvd, cpanel)
+elif [ -d /usr/local/cpanel ] \
+   || [ -f /usr/local/cpanel/version ] \
+   || pgrep -f 'cpsrvd|cpanel' >/dev/null 2>&1 \
+   || is_active cpanel \
+   || is_active cpsrvd; then
     PANEL="cPanel"
-elif [ -d /usr/local/psa ]; then
+
+# Plesk
+elif [ -d /usr/local/psa ] \
+   || [ -d /opt/psa ] \
+   || pgrep -f 'psa|plesk' >/dev/null 2>&1 \
+   || is_active psa \
+   || is_active sw-engine; then
     PANEL="Plesk"
 fi
 
