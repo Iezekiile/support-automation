@@ -1,157 +1,238 @@
 #!/bin/bash
 
-# Функція конвертації дати логів у timestamp (приклад для формату: 10/Oct/2023:14:22:01)
-log_date_to_epoch() {
-  date_str="$1"
-  # Конвертуємо дату формату dd/MMM/yyyy:HH:mm:ss у формат для date
-  # Припускаємо, що локаль англійська для місяців
-  date -d "$(echo "$date_str" | sed 's/\// /g; s/:/ /4')" +%s 2>/dev/null
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RESULT_FILE="${SCRIPT_DIR}/log-analysis-result.txt"
+> "$RESULT_FILE"
+
+log() {
+    echo "$1" | tee -a "$RESULT_FILE"
 }
 
-# Визначення періоду часу (час початку фільтрації)
-select_time_range() {
-  echo "Оберіть період аналізу логів:"
-  echo "1) Остання година"
-  echo "2) Останні 2 години"
-  echo "3) Останні 4 години"
-  echo "4) Останні 24 години"
-  read -rp "Введіть номер опції: " time_option
+log "=== Log analysis started ==="
+log "Started at: $(date)"
+log ""
 
-  case $time_option in
-    1) echo "1 hour";;
-    2) echo "2 hours";;
-    3) echo "4 hours";;
-    4) echo "24 hours";;
-    *) echo "1 hour";;
-  esac
-}
+# --- 1. Визначення вебсервера та панелі керування ---
 
-# Пошук логів за доменом або всі
-find_log_files() {
-  local domain="$1"
-  local logs=()
-  local patterns=()
+WEBSERVER=""
+PANEL="unknown"
 
-  # Типові каталоги з логами
-  local paths=(
-    "/var/log/nginx/domains"
-    "/var/log/nginx"
-    "/var/log/apache2"
-    "/usr/local/nginx/logs"
-    "/var/www"
-  )
-
-  # Формуємо патерни
-  if [[ -n "$domain" ]]; then
-    patterns=(
-      "$domain"
-      "$domain.*"
-      "*$domain*"
-      "*${domain}_ssl*"
-      "*${domain}-ssl*"
-      "access.log"
-      "access.log.*"
-    )
-  else
-    patterns=(
-      "access.log"
-      "access.log.*"
-      "*.log"
-      "*_ssl*"
-      "*-ssl*"
-    )
-  fi
-
-  for p in "${paths[@]}"; do
-    [[ -d "$p" ]] || continue
-
-    for pat in "${patterns[@]}"; do
-      while IFS= read -r -d '' file; do
-        # Базова перевірка: файл має бути текстовим і читабельним
-        if [[ -r "$file" ]] && file "$file" | grep -qi "text"; then
-          logs+=("$file")
-        fi
-      done < <(find "$p" -type f -name "$pat" -print0 2>/dev/null)
-    done
-  done
-
-  # Прибираємо дублікати
-  printf '%s\n' "${logs[@]}" | sort -u
-}
-
-# Фільтрація логів за часом
-filter_logs_by_time() {
-  local files=("$@")
-  local since_epoch=$SINCE_EPOCH
-
-  # Припущення формату дати в логах: [10/Oct/2023:14:22:01 ...]
-  for f in "${files[@]}"; do
-    awk -v since="$since_epoch" '
-      {
-        # Витягаємо дату з логу у форматі dd/MMM/yyyy:HH:mm:ss (між [ та :)
-        match($0, /\[([0-9]{2}\/[A-Za-z]{3}\/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2})/, arr)
-        if (arr[1] != "") {
-          cmd = "date -d \"" arr[1] "\" +%s"
-          cmd | getline logtime
-          close(cmd)
-          if (logtime >= since) print $0
-        }
-      }
-    ' "$f"
-  done
-}
-
-######################
-# Початок виконання скрипту
-
-# 1. Вибір періоду часу
-TIME_RANGE=$(select_time_range)
-SINCE_EPOCH=$(date -d "-$TIME_RANGE" +%s)
-
-# 2. Вибір домену
-read -rp "Введіть домен для аналізу або 'all' для всіх доменів: " DOMAIN_INPUT
-if [[ "$DOMAIN_INPUT" == "all" || -z "$DOMAIN_INPUT" ]]; then
-  DOMAIN=""
+if pgrep -x nginx >/dev/null; then
+    WEBSERVER="nginx"
+elif pgrep -x httpd >/dev/null || pgrep -x apache2 >/dev/null; then
+    WEBSERVER="apache"
+elif pgrep -x lshttpd >/dev/null; then
+    WEBSERVER="litespeed"
 else
-  DOMAIN="$DOMAIN_INPUT"
+    echo "Не вдалося визначити вебсервер." >&2
+    exit 1
 fi
 
-# 3. Знаходимо логи
-LOG_FILES=($(find_log_files "$DOMAIN"))
-
-if [[ ${#LOG_FILES[@]} -eq 0 ]]; then
-  echo "Не знайдено логів для домену '${DOMAIN:-всі}'."
-  exit 1
+if pgrep -x directadmin >/dev/null; then
+    PANEL="DirectAdmin"
+elif [ -d /usr/local/cpanel ]; then
+    PANEL="cPanel"
+elif [ -d /usr/local/psa ]; then
+    PANEL="Plesk"
 fi
 
-# 4. Вибір UA поля
-read -rp "Для User-Agent: введіть 1 для NF-1 або 2 для NF-2: " UA_FIELD_NUM
-if ! [[ "$UA_FIELD_NUM" =~ ^[12]$ ]]; then
-  UA_FIELD_NUM=1
+SERVER_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+
+log "Webserver: $WEBSERVER"
+log "Control panel: $PANEL"
+log "Server time: $SERVER_TIME"
+log ""
+
+# --- 2. Пошук конфігів і доменів ---
+
+declare -A DOMAIN_LOGS_SET
+declare -A DOMAIN_SSL_LOGS_SET
+
+CONF_PATHS=()
+
+case "$WEBSERVER" in
+    nginx)
+        CONF_PATHS+=(/etc/nginx/conf.d /etc/nginx/sites-enabled /usr/local/nginx/conf/vhosts)
+        ;;
+    apache)
+        CONF_PATHS+=(/etc/httpd/conf.d /etc/apache2/sites-enabled)
+        ;;
+    litespeed)
+        CONF_PATHS+=(/usr/local/lsws/conf/vhosts)
+        ;;
+esac
+
+is_text_file() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    local mime
+    mime=$(file --mime-type -b "$file")
+    [[ "$mime" == text/* ]] && return 0
+    return 1
+}
+
+for CONF_DIR in "${CONF_PATHS[@]}"; do
+    [ -d "$CONF_DIR" ] || continue
+
+    while IFS= read -r CONF_FILE; do
+        DOMAIN=$(grep -E "server_name|ServerName" "$CONF_FILE" 2>/dev/null | head -n1 | awk '{print $2}' | sed 's/;//')
+        LOGS=$(grep -E "access_log|CustomLog" "$CONF_FILE" 2>/dev/null | awk '{print $2}' | sed 's/;//')
+
+        if [[ -n "$DOMAIN" && -n "$LOGS" ]]; then
+            for logf in $LOGS; do
+                [ -z "$logf" ] && continue
+                if [[ "$logf" != /* ]]; then
+                    logf="$(dirname "$CONF_FILE")/$logf"
+                fi
+                if is_text_file "$logf"; then
+                    if [[ "$logf" =~ ssl|https ]]; then
+                        DOMAIN_SSL_LOGS_SET["$DOMAIN|$logf"]=1
+                    else
+                        DOMAIN_LOGS_SET["$DOMAIN|$logf"]=1
+                    fi
+                fi
+            done
+        fi
+    done < <(find "$CONF_DIR" -type f)
+done
+
+if [ "${#DOMAIN_LOGS_SET[@]}" -eq 0 ] && [ "${#DOMAIN_SSL_LOGS_SET[@]}" -eq 0 ]; then
+    echo "Не знайдено доменів та логів." >&2
+    exit 1
 fi
 
-# 5. Кількість рядків для виводу
-read -rp "Скільки рядків показувати (head -n, за замовчуванням 20): " HEAD_COUNT
-if ! [[ "$HEAD_COUNT" =~ ^[0-9]+$ ]]; then
-  HEAD_COUNT=20
+get_domain_logs() {
+    local domain="$1"
+    local -n arr_ref=$2
+    arr_ref=()
+    for key in "${!DOMAIN_LOGS_SET[@]}"; do
+        if [[ $key == "$domain|"* ]]; then
+            arr_ref+=("${key#*|}")
+        fi
+    done
+}
+
+get_domain_ssl_logs() {
+    local domain="$1"
+    local -n arr_ref=$2
+    arr_ref=()
+    for key in "${!DOMAIN_SSL_LOGS_SET[@]}"; do
+        if [[ $key == "$domain|"* ]]; then
+            arr_ref+=("${key#*|}")
+        fi
+    done
+}
+
+# --- 3. Вибір домену ---
+
+echo "Доступні домени:"
+DOMAINS=()
+for key in "${!DOMAIN_LOGS_SET[@]}"; do
+    DOMAINS+=("${key%%|*}")
+done
+for key in "${!DOMAIN_SSL_LOGS_SET[@]}"; do
+    DOMAINS+=("${key%%|*}")
+done
+readarray -t DOMAINS_UNIQ < <(printf '%s\n' "${DOMAINS[@]}" | sort -u)
+
+select DOMAIN in "ALL" "${DOMAINS_UNIQ[@]}"; do
+    [ -n "$DOMAIN" ] && break
+done
+
+# --- 4. Вибір періоду ---
+
+echo "Оберіть період:"
+select PERIOD in "1h" "2h" "4h" "8h" "24h" "ALL"; do
+    [ -n "$PERIOD" ] && break
+done
+
+case "$PERIOD" in
+    1h) SINCE_EPOCH=$(( $(date +%s) - 3600 ));;
+    2h) SINCE_EPOCH=$(( $(date +%s) - 7200 ));;
+    4h) SINCE_EPOCH=$(( $(date +%s) - 14400 ));;
+    8h) SINCE_EPOCH=$(( $(date +%s) - 28800 ));;
+    24h) SINCE_EPOCH=$(( $(date +%s) - 86400 ));;
+    ALL) SINCE_EPOCH=0;;
+esac
+
+# --- 5. TOP значень ---
+
+read -p "Скільки значень виводити (20/50/100) [20]: " TOP
+TOP=${TOP:-20}
+
+# --- 6. Аналіз логів ---
+
+analyze_files() {
+    local DOMAIN_NAME="$1"
+    shift
+    local FILES=("$@")
+
+    log "=== Domain: $DOMAIN_NAME ==="
+    log "Log files:"
+    for f in "${FILES[@]}"; do
+        log " - $f"
+    done
+
+    FILTERED_LINES=$(mktemp)
+    for f in "${FILES[@]}"; do
+        if [ "$SINCE_EPOCH" -eq 0 ]; then
+            cat "$f" >> "$FILTERED_LINES"
+        else
+            awk -v since="$SINCE_EPOCH" '
+            {
+                match($0, /\[([0-9]{2})\/([A-Za-z]{3})\/([0-9]{4}):([0-9]{2}):([0-9]{2}):([0-9]{2}) ([+\-0-9]{5})\]/, arr);
+                if(arr[0] != ""){
+                    mon = arr[2]
+                    m["Jan"]="01"; m["Feb"]="02"; m["Mar"]="03"; m["Apr"]="04"; m["May"]="05"; m["Jun"]="06";
+                    m["Jul"]="07"; m["Aug"]="08"; m["Sep"]="09"; m["Oct"]="10"; m["Nov"]="11"; m["Dec"]="12";
+                    month = m[mon]
+                    date_str = arr[3] "-" month "-" arr[1] " " arr[4] ":" arr[5] ":" arr[6] " " arr[7]
+                    cmd = "date -d \"" date_str "\" +%s"
+                    cmd | getline logtime
+                    close(cmd)
+                    if (logtime >= since)
+                        print $0
+                }
+            }
+            ' "$f" >> "$FILTERED_LINES"
+        fi
+    done
+
+    log "--- TOP IP (combined SSL + non-SSL) ---"
+    awk '{print $1}' "$FILTERED_LINES" | sort | uniq -c | sort -nr | head -n "$TOP" | tee -a "$RESULT_FILE"
+
+    log "--- TOP User-Agents (combined SSL + non-SSL) ---"
+    awk -F\" '{print $6}' "$FILTERED_LINES" | grep -v '^$' | sort | uniq -c | sort -nr | head -n "$TOP" | tee -a "$RESULT_FILE"
+
+    log ""
+    rm -f "$FILTERED_LINES"
+}
+
+if [ "$DOMAIN" = "ALL" ]; then
+    declare -A ALL_LOGS_SET
+    for d in "${DOMAINS_UNIQ[@]}"; do
+        get_domain_logs "$d" arr1
+        get_domain_ssl_logs "$d" arr2
+        for f in "${arr1[@]}" "${arr2[@]}"; do
+            ALL_LOGS_SET["$f"]=1
+        done
+    done
+    FILES=("${!ALL_LOGS_SET[@]}")
+    analyze_files "ALL_DOMAINS" "${FILES[@]}"
+else
+    FILES1=()
+    FILES2=()
+    get_domain_logs "$DOMAIN" FILES1
+    get_domain_ssl_logs "$DOMAIN" FILES2
+    FILES=("${FILES1[@]}" "${FILES2[@]}")
+
+    if [ ${#FILES[@]} -eq 0 ]; then
+        log "Лог файли для домену $DOMAIN не знайдені."
+        exit 1
+    fi
+
+    analyze_files "$DOMAIN" "${FILES[@]}"
 fi
 
-# 6. Фільтруємо логи за часом і зберігаємо у тимчасовий файл
-TMP_LOG=$(mktemp)
-filter_logs_by_time "${LOG_FILES[@]}" > "$TMP_LOG"
-
-# 7. Виводимо статистику по User-Agent
-echo
-echo "Топ $HEAD_COUNT User-Agent за період $TIME_RANGE для домену '${DOMAIN:-всі}':"
-awk -F'"' -v field_num="$UA_FIELD_NUM" '{
-  ua = $(NF - field_num);
-  if(length(ua)) print ua; else print "<EMPTY-USER-AGENT>"
-}' "$TMP_LOG" | sort | uniq -c | sort -nr | head -n "$HEAD_COUNT"
-
-# 8. Виводимо статистику по IP
-echo
-echo "Топ $HEAD_COUNT IP за період $TIME_RANGE для домену '${DOMAIN:-всі}':"
-awk '{print $1}' "$TMP_LOG" | sort | uniq -c | sort -nr | head -n "$HEAD_COUNT"
-
-# 9. Чистимо тимчасовий файл
-rm -f "$TMP_LOG"
+log "=== Log analysis finished ==="
+log "Finished at: $(date)"
