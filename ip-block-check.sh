@@ -126,7 +126,8 @@ else
   crowd_decision="$(cscli decisions list --all 2>/dev/null | grep -F -- "$IP" || true)"
   if [[ -n "${crowd_decision//[$'\n'[:space:]]/}" ]]; then
     crowd_status="blocked"
-    crowd_alert_id=$(printf '%s\n' "$crowd_decision" | awk '{print $1}' | head -n1 || true)
+    # extract alert id: cscli table is '|' separated and alert id is the last non-empty column
+    crowd_alert_id=$(printf '%s\n' "$crowd_decision" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$NF); print $NF}' | head -n1 || true)
   else
     crowd_status="no_block"
   fi
@@ -152,114 +153,5 @@ status_line() {
     missing)        printf "%-10s : %s\n" "$name" "команда не знайдена";;
     log_missing)    printf "%-10s : %s\n" "$name" "лог не знайдено";;
     no_block|no_entries) printf "%-10s : %s\n" "$name" "нема блокування";;
-    blocked_temp|blocked_deny|blocked_other) printf "%-10s : %s\n" "$name" "Є блокування";;
-    allow)          printf "%-10s : %s\n" "$name" "ALLOW запис";;
-    *)              printf "%-10s : %s\n" "$name" "невідомо";;
-  esac
-}
-
-status_line "CSF"    "$csf_status"
-status_line "ModSec" "$modsec_status"
-status_line "CrowdS" "$crowd_status"
-status_line "cPHulk" "$cphulk_status"
-
-# --- Detailed sections for systems with blocks ---
-echo
-print_title "Деталі та рекомендації (лише для систем з блокуванням)"
-
-# CSF details (if blocked or ALLOW)
-if [[ "$csf_status" == "blocked_temp" || "$csf_status" == "blocked_deny" || "$csf_status" == "blocked_other" || "$csf_status" == "allow" ]]; then
-  echo "== CSF =="
-  if [[ -n "$csf_output" ]]; then
-    echo "CSF records:"
-    printf '%s\n' "$csf_output"
-  else
-    echo "CSF: немає виводу"
-  fi
-  echo
-  echo "Рекомендовані дії:"
-  if [[ "$csf_status" == "blocked_temp" ]]; then
-    echo "- Тимчасове блокування: csf -tr $IP"
-  fi
-  if [[ "$csf_status" == "blocked_deny" ]]; then
-    echo "- Перманентний DENY: csf -dr $IP"
-  fi
-  if [[ "$csf_status" == "allow" ]]; then
-    echo "- ALLOW запис: csf -ar $IP"
-  fi
-  if [[ "$csf_status" == "blocked_other" ]]; then
-    echo "- Інший запис у CSF (перегляньте вивід вище)"
-  fi
-
-  # Show LFD matches only when CSF had TEMP/DENY
-  if [[ "$csf_status" == "blocked_temp" || "$csf_status" == "blocked_deny" ]]; then
-    echo
-    echo "== LFD (перевірка пов'язана з CSF) =="
-    if [[ -n "$lfd_matches" ]]; then
-      printf '%s\n' "$lfd_matches"
-      echo
-      echo "Рекомендовані дії:"
-      echo "- Перевірити записи LFD у $LFD_LOG та очистити/відкоригувати за потреби (залежить від конфігурації)."
-    else
-      # differentiate missing log vs no matches
-      if [[ ! -f "$LFD_LOG" && -z $(ls "${LFD_LOG}"* 2>/dev/null) ]]; then
-        echo "LFD лог не знайдено: $LFD_LOG"
-      else
-        echo "LFD: відповідних записів не знайдено"
-      fi
-    fi
-  fi
-fi
-
-# ModSecurity details
-if [[ "$modsec_status" == "entries_found" ]]; then
-  echo
-  echo "== ModSecurity =="
-  echo "Log entries:"
-  printf '%s\n' "$modsec_matches"
-  echo
-  echo "Рекомендовані дії:"
-  echo "- Перевірити whitelist (наприклад): /etc/apache2/conf.d/modsec/modsec2.wordpress.conf"
-  echo "- Перевірити конфіг Apache: httpd -t"
-  echo "- Reload Apache: systemctl reload httpd"
-  echo "- Для LiteSpeed: /usr/local/lsws/bin/lswsctrl restart"
-fi
-
-# CrowdSec details
-if [[ "$crowd_status" == "blocked" ]]; then
-  echo
-  echo "== CrowdSec =="
-  echo "Decision(s):"
-  printf '%s\n' "$crowd_decision"
-  if [[ -n "$crowd_alert_id" ]]; then
-    echo
-    echo "Alert details (cscli alerts inspect):"
-    cscli alerts inspect -d "$crowd_alert_id" 2>/dev/null || true
-  fi
-  echo
-  echo "Рекомендовані дії:"
-  echo "- Unblock: cscli decisions delete -i $IP"
-  echo "- Add to allowlist: cscli allowlists add clients $IP"
-fi
-
-# cPHulk details
-if [[ "$cphulk_status" == "entries_found" ]]; then
-  echo
-  echo "== cPHulk =="
-  echo "Log entries:"
-  printf '%s\n' "$cphulk_matches"
-  echo
-  echo "Рекомендовані дії:"
-  echo "- Unblock (cPanel): /scripts/hulk-unban-ip $IP"
-fi
-
-# If nothing found at all:
-if [[ "$csf_status" == "no_block" || "$csf_status" == "missing" ]] && [[ "$modsec_status" != "entries_found" ]] && [[ "$crowd_status" != "blocked" ]] && [[ "$cphulk_status" != "entries_found" ]]; then
-  echo "Ніяких блокувань не виявлено (за перевіреними системами)."
-fi
-
-echo
-sep
-printf "IP check finished for: %s\n" "$IP"
-sep
-echo
+    blocked|blocked_temp|blocked_deny|blocked_other) printf "%-10s : %s\n" "$name" "Є блокування";;
+    allow)          pr
