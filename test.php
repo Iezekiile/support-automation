@@ -2,133 +2,173 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-echo "<h2>Тест завантаження та збереження зображень</h2>";
+/**
+ * Plain-text version of the image download/save tester.
+ * Designed for CLI / console output (no HTML/CSS).
+ */
 
-// URL для тестування
+$NL = PHP_EOL;
+
+function out($text = '') {
+    echo $text . PHP_EOL;
+}
+
+function kv($key, $value, $pad = 28) {
+    printf("%-{$pad}s : %s" . PHP_EOL, $key, $value);
+}
+
+function hr($char = '-', $len = 72) {
+    echo str_repeat($char, $len) . PHP_EOL;
+}
+
+function human_filesize($bytes, $decimals = 2) {
+    $size = ['B','KB','MB','GB','TB'];
+    $factor = floor((strlen($bytes) - 1) / 3);
+    return sprintf("%.{$decimals}f %s", $bytes / pow(1024, $factor), $size[$factor]);
+}
+
+function printable_snippet($data, $len = 200) {
+    $s = substr($data, 0, $len);
+    // Replace non-printable characters with dots
+    $s = preg_replace('/[^\x20-\x7E]/', '.', $s);
+    return $s;
+}
+
+// Config
 $testUrls = [
     'https://picsum.photos/200/300',
     'https://niala.com.ua/image/catalog/kb-a4f-btp2.jpg'
+    'https://niala.com.ua/image/catalog/prod/kiborg/zymovyi-maskuvalnyi-vodovidshtokhuvalnyi-taktychnyi-kostium-kiborg-multicam-alpine-29735080882236_+8d12af5aa9.jpg'
 ];
 
-// Директорія для збереження
-$testDir = __DIR__ . '/test_images/';
+$testDir = __DIR__ . DIRECTORY_SEPARATOR . 'test_images' . DIRECTORY_SEPARATOR;
 
-// Створити директорію якщо не існує
+// Header
+hr('=');
+out('Тест завантаження та збереження зображень (plain text)');
+hr('=');
+out();
+
+// Ensure directory
 if (!is_dir($testDir)) {
-    mkdir($testDir, 0755, true);
-    echo "✓ Директорію створено: $testDir<br><br>";
+    $created = @mkdir($testDir, 0755, true);
+    if ($created) {
+        kv('Директорію створено', $testDir);
+    } else {
+        kv('Не вдалося створити директорію', $testDir);
+    }
 } else {
-    echo "✓ Директорія існує: $testDir<br><br>";
+    kv('Директорія', $testDir);
 }
 
-// Перевірка прав на запис
-if (!is_writable($testDir)) {
-    echo "❌ <strong>ПОМИЛКА:</strong> Немає прав на запис в директорію $testDir<br>";
-    echo "Поточний користувач: " . get_current_user() . "<br>";
-    echo "Права директорії: " . substr(sprintf('%o', fileperms($testDir)), -4) . "<br><br>";
-} else {
-    echo "✓ Директорія доступна для запису<br><br>";
-}
+$writable = is_writable($testDir);
+kv('Права на запис', $writable ? 'YES' : 'NO');
+kv('Права (octal)', substr(sprintf('%o', fileperms($testDir)), -4));
+kv('Поточний користувач', get_current_user());
+out();
 
-echo "<hr>";
+hr();
 
+// Tests
 foreach ($testUrls as $index => $url) {
     $num = $index + 1;
-    echo "<h3>Тест #{$num}: $url</h3>";
-    
     $filename = $testDir . 'test_image_' . $num . '.jpg';
-    
-    // === ТЕСТ 1: file_get_contents ===
-    echo "<strong>1. Тест file_get_contents($url)</strong><br>";
-    
-    $startTime = microtime(true);
+
+    out("Тест #{$num}");
+    hr();
+
+    kv('Джерело', $url);
+
+    // --- Download
+    $start = microtime(true);
     $imageData = @file_get_contents($url);
-    $endTime = microtime(true);
-    
+    $end = microtime(true);
+
     if ($imageData === false) {
-        $error = error_get_last();
-        echo "❌ ПОМИЛКА: Не вдалося завантажити<br>";
-        echo "Деталі: " . ($error['message'] ?? 'Невідома помилка') . "<br>";
-        
-        // Додаткова інформація
+        $err = error_get_last();
+        kv('Завантаження', 'FAILED');
+        kv('Помилка', $err['message'] ?? 'Невідома помилка');
         if (!function_exists('curl_init')) {
-            echo "⚠️ CURL не встановлено<br>";
+            kv('CURL', 'не встановлено (можливо потрібно для деяких середовищ)');
         }
-        
-        echo "<br>";
+        out();
         continue;
     }
-    
-    $downloadTime = round(($endTime - $startTime) * 1000, 2);
-    $fileSize = strlen($imageData);
-    
-    echo "✓ Успішно завантажено<br>";
-    echo "├─ Розмір: " . number_format($fileSize) . " байт (" . round($fileSize/1024, 2) . " KB)<br>";
-    echo "├─ Час завантаження: {$downloadTime} мс<br>";
-    
-    // Перевірка чи це дійсно зображення
+
+    $downloadMs = round(($end - $start) * 1000, 2);
+    $sizeBytes = strlen($imageData);
+
+    // MIME
     $finfo = new finfo(FILEINFO_MIME_TYPE);
-    $mimeType = $finfo->buffer($imageData);
-    echo "├─ MIME тип: $mimeType<br>";
-    
-    if (!in_array($mimeType, ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/jpg'])) {
-        echo "❌ <strong>УВАГА:</strong> Це НЕ зображення!<br>";
-        echo "Перші 200 символів:<br>";
-        echo "<pre>" . htmlspecialchars(substr($imageData, 0, 200)) . "</pre><br>";
+    $mime = $finfo->buffer($imageData);
+
+    kv('Завантаження', 'OK');
+    kv('Розмір (байт)', number_format($sizeBytes));
+    kv('Розмір (зручний)', human_filesize($sizeBytes));
+    kv('Час завантаження', $downloadMs . ' ms');
+    kv('MIME', $mime);
+
+    $isImage = in_array($mime, ['image/jpeg','image/png','image/gif','image/webp','image/jpg']);
+    kv('Чи зображення', $isImage ? 'YES' : 'NO');
+
+    if (!$isImage) {
+        out();
+        out('Перші 200 символів відповіді (не-зображення):');
+        out(printable_snippet($imageData, 200));
+        out();
         continue;
     }
-    
-    echo "✓ Підтверджено: це зображення<br><br>";
-    
-    // === ТЕСТ 2: file_put_contents ===
-    echo "<strong>2. Тест file_put_contents('$filename')</strong><br>";
-    
+
+    // --- Save
     $bytesWritten = @file_put_contents($filename, $imageData);
-    
     if ($bytesWritten === false) {
-        $error = error_get_last();
-        echo "❌ ПОМИЛКА: Не вдалося зберегти файл<br>";
-        echo "Деталі: " . ($error['message'] ?? 'Невідома помилка') . "<br>";
-        
-        // Детальна діагностика
+        $err = error_get_last();
+        kv('Збереження', 'FAILED');
+        kv('Помилка', $err['message'] ?? 'Невідома помилка');
         $dir = dirname($filename);
-        echo "<strong>Діагностика:</strong><br>";
-        echo "├─ Директорія існує: " . (is_dir($dir) ? 'ТАК' : 'НІ') . "<br>";
-        echo "├─ Директорія доступна для запису: " . (is_writable($dir) ? 'ТАК' : 'НІ') . "<br>";
-        echo "├─ Повний шлях: $filename<br>";
-        
+        kv('Директорія існує', is_dir($dir) ? 'YES' : 'NO');
+        kv('Доступна для запису', is_writable($dir) ? 'YES' : 'NO');
+        kv('Повний шлях', $filename);
     } else {
-        echo "✓ Успішно збережено<br>";
-        echo "├─ Записано байт: " . number_format($bytesWritten) . "<br>";
-        echo "├─ Файл існує: " . (file_exists($filename) ? 'ТАК' : 'НІ') . "<br>";
-        
-        if (file_exists($filename)) {
-            $savedSize = filesize($filename);
-            echo "├─ Розмір файлу на диску: " . number_format($savedSize) . " байт<br>";
-            echo "└─ Розміри співпадають: " . ($savedSize == $fileSize ? '✓ ТАК' : '❌ НІ') . "<br>";
-            
-            // Показати зображення якщо це веб-доступна директорія
-            $webPath = str_replace($_SERVER['DOCUMENT_ROOT'], '', $filename);
-            if (strpos($filename, $_SERVER['DOCUMENT_ROOT']) === 0) {
-                echo "<br><img src='$webPath' style='max-width: 300px; border: 1px solid #ccc;'><br>";
+        $savedSize = file_exists($filename) ? filesize($filename) : 0;
+        kv('Збережено байт', number_format($bytesWritten));
+        kv('Файл існує', file_exists($filename) ? 'YES' : 'NO');
+        kv('Розмір на диску', number_format($savedSize));
+        kv('Розміри співпадають', ($savedSize == $sizeBytes) ? 'YES' : 'NO');
+        kv('Повний шлях', $filename);
+
+        // Optional: if DOCUMENT_ROOT is set, provide suggested web path
+        if (!empty($_SERVER['DOCUMENT_ROOT'])) {
+            $docRoot = realpath($_SERVER['DOCUMENT_ROOT']);
+            $realFile = realpath($filename);
+            if ($docRoot !== false && $realFile !== false && strpos($realFile, $docRoot) === 0) {
+                $webPath = str_replace(DIRECTORY_SEPARATOR, '/', substr($realFile, strlen($docRoot)));
+                if ($webPath === '' || $webPath[0] !== '/') $webPath = '/' . ltrim($webPath, '/');
+                kv('Suggested web path', $webPath);
             }
         }
     }
-    
-    echo "<hr>";
+
+    out();
+    hr();
+    out();
 }
 
-// === ДОДАТКОВА ІНФОРМАЦІЯ ===
-echo "<h3>Системна інформація</h3>";
-echo "PHP версія: " . phpversion() . "<br>";
-echo "allow_url_fopen: " . (ini_get('allow_url_fopen') ? 'ON' : 'OFF') . "<br>";
-echo "max_execution_time: " . ini_get('max_execution_time') . " сек<br>";
-echo "memory_limit: " . ini_get('memory_limit') . "<br>";
-echo "upload_max_filesize: " . ini_get('upload_max_filesize') . "<br>";
-echo "Поточна директорія: " . getcwd() . "<br>";
-echo "DOCUMENT_ROOT: " . ($_SERVER['DOCUMENT_ROOT'] ?? 'не встановлено') . "<br>";
+// System info
+out('Системна інформація:');
+hr();
+kv('PHP версія', phpversion());
+kv('allow_url_fopen', ini_get('allow_url_fopen') ? 'ON' : 'OFF');
+kv('max_execution_time', ini_get('max_execution_time') . ' сек');
+kv('memory_limit', ini_get('memory_limit'));
+kv('upload_max_filesize', ini_get('upload_max_filesize'));
+kv('Поточна директорія', getcwd());
+kv('DOCUMENT_ROOT', $_SERVER['DOCUMENT_ROOT'] ?? '(not set)');
+hr();
 
-echo "<br><h3>Результат тестування</h3>";
-echo "Перевірте директорію: <strong>$testDir</strong><br>";
-echo "Якщо файли збереглися - file_put_contents працює!<br>";
-?>
+out('Результат тестування:');
+kv('Перевірте директорію', $testDir);
+out();
+out('Якщо файли збереглися — file_put_contents працює.');
+out();
+hr('=');
